@@ -1,0 +1,4 @@
+azure-search-documents  # Search and index documents in Azure Cognitive Search.
+azure-ai-formrecognizer # Extract data from forms and documents using AI.
+openai                  # Generate or summarize text with GPT models.
+requests                # Make HTTP API calls.
