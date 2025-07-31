@@ -14,24 +14,29 @@ from dotenv import load_dotenv
 # Import the interactive search functionality
 from interactive_search import start_interactive_search
 
+# ================================================================================================
+# STEP 1: ENVIRONMENT SETUP AND CONFIGURATION
+# ================================================================================================
+
 # Load environment variables from .env file
 load_dotenv()
 
-# Azure Configurations
+# Azure Search Service Configurations
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_API_KEY = os.getenv("AZURE_SEARCH_API_KEY")
 AZURE_SEARCH_INDEX_NAME = "library"
 
+# Azure Document Intelligence Service Configurations
 DOC_INTELLIGENCE_ENDPOINT = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
 DOC_INTELLIGENCE_KEY = os.getenv("DOC_INTELLIGENCE_KEY")
 
+# Azure OpenAI Service Configurations
 OPENAI_API_ENDPOINT = os.getenv("OPENAI_API_ENDPOINT")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_VERSION = "2024-10-21"
-#OPENAI_EMBEDDING_MODEL = "text-embedding-3-large"
 OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002"
 
-# URLs of PDFs to download
+# URLs of PDFs to download and process
 urls = [
     "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjA5MjcwMy0wMDEiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D",
     "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjEwNTUxOC0wMDEiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D",
@@ -39,15 +44,15 @@ urls = [
     "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjA4MTQ5OS0wMDIiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D"
 ]
 
-# Dummy Documents
-# urls = [
-#     "https://drive.google.com/uc?export=download&id=1oFOzMI_0B8lMqXePmBIRJ5DsYSDNR1sM",
-#     "https://drive.google.com/uc?export=download&id=14tog4mFflzasQhFpDxaeMCK-XoqeHLJ9"
-# ]
 
-# --- Step 1: Create Azure Cognitive Search Index with Vector Search ---
+# ================================================================================================
+# STEP 2: AZURE COGNITIVE SEARCH INDEX CREATION WITH VECTOR SEARCH CAPABILITIES
+# ================================================================================================
 
 def create_search_index():
+    """Creates or updates Azure Cognitive Search index with vector search capabilities."""
+    print("STEP 2: Creating Azure Cognitive Search Index...")
+
     credential = AzureKeyCredential(AZURE_SEARCH_API_KEY)
     index_client = SearchIndexClient(endpoint=AZURE_SEARCH_ENDPOINT, credential=credential)
 
@@ -73,28 +78,41 @@ def create_search_index():
     )
 
     index = SearchIndex(name=AZURE_SEARCH_INDEX_NAME, fields=fields, vector_search=vector_search)
-
-    # Create or update the index
     index_client.create_or_update_index(index=index)
     print(f"Index '{AZURE_SEARCH_INDEX_NAME}' created/updated successfully.")
 
-# --- Step 2: Download PDFs from URLs ---
+
+# ================================================================================================
+# STEP 3: PDF DOCUMENT DOWNLOAD FROM URLS
+# ================================================================================================
 
 def download_pdf(url, dest_path):
-    print(f"Downloading {url} to {dest_path}...")
-    response = requests.get(url)
-    if response.status_code == 200:
-        with open(dest_path, "wb") as f:
-            f.write(response.content)
-        print("Download completed.")
-        return True
-    else:
-        print(f"Failed to download {url}. Status code: {response.status_code}")
+    """Downloads a PDF file from URL and saves it to local path."""
+    print(f"STEP 3: Downloading {url} to {dest_path}...")
+
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(dest_path, "wb") as f:
+                f.write(response.content)
+            print("Download completed.")
+            return True
+        else:
+            print(f"Failed to download {url}. Status code: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"Error downloading {url}: {str(e)}")
         return False
 
-# --- Step 3: Use Azure Document Intelligence to extract content and metadata ---
+
+# ================================================================================================
+# STEP 4: CONTENT AND METADATA EXTRACTION USING AZURE DOCUMENT INTELLIGENCE
+# ================================================================================================
 
 def extract_content_with_doc_intelligence(file_path):
+    """Extracts text content and metadata from PDF using Azure Document Intelligence."""
+    print(f"STEP 4: Extracting content from {file_path} with Document Intelligence...")
+
     credential = AzureKeyCredential(DOC_INTELLIGENCE_KEY)
     client = DocumentAnalysisClient(endpoint=DOC_INTELLIGENCE_ENDPOINT, credential=credential)
 
@@ -102,14 +120,12 @@ def extract_content_with_doc_intelligence(file_path):
         poller = client.begin_analyze_document("prebuilt-document", document=f_stream)
         result = poller.result()
 
-    # Extract text content (concatenate lines from all pages)
     text_lines = []
     for page in result.pages:
         for line in page.lines:
             text_lines.append(line.content)
     text = "\n".join(text_lines)
 
-    # Extract metadata fields (some may be None if not present)
     metadata = {}
     if hasattr(result, "metadata") and result.metadata:
         metadata = {
@@ -118,12 +134,18 @@ def extract_content_with_doc_intelligence(file_path):
             "creation_date": result.metadata.created_date if hasattr(result.metadata, "created_date") else None
         }
 
+    print(f"Extracted {len(text)} characters of text content.")
     return text, metadata
 
-# --- Step 4: Generate Embeddings for content using Azure OpenAI ---
+
+# ================================================================================================
+# STEP 5: VECTOR EMBEDDINGS GENERATION USING AZURE OPENAI
+# ================================================================================================
 
 def get_embedding(text):
-    # Initialize Azure OpenAI client with new syntax
+    """Generates vector embeddings for text using Azure OpenAI embedding model."""
+    print("STEP 5: Generating embeddings using Azure OpenAI...")
+
     client = AzureOpenAI(
         api_key=OPENAI_API_KEY,
         api_version=OPENAI_API_VERSION,
@@ -131,80 +153,108 @@ def get_embedding(text):
     )
 
     try:
-        # Use new client syntax for embeddings
         response = client.embeddings.create(
             input=text,
-            model=OPENAI_EMBEDDING_MODEL  # Note: 'model' instead of 'engine'
+            model=OPENAI_EMBEDDING_MODEL
         )
-        return response.data[0].embedding
+        embedding = response.data[0].embedding
+        print(f"Generated embedding with {len(embedding)} dimensions.")
+        return embedding
     except Exception as e:
         print(f"Error generating embedding: {e}")
         raise
 
-# --- Step 5: Upload documents to Azure Cognitive Search ---
+
+# ================================================================================================
+# STEP 6: DOCUMENT UPLOAD TO AZURE COGNITIVE SEARCH
+# ================================================================================================
 
 def upload_documents_to_search(documents):
+    """Uploads processed documents to Azure Cognitive Search index."""
+    print("STEP 6: Uploading documents to Azure Cognitive Search...")
+
     credential = AzureKeyCredential(AZURE_SEARCH_API_KEY)
     search_client = SearchClient(
         endpoint=AZURE_SEARCH_ENDPOINT,
         index_name=AZURE_SEARCH_INDEX_NAME,
         credential=credential
     )
-    results = search_client.upload_documents(documents=documents)
-    for i, r in enumerate(results):
-        print(f"Document {i+1} upload success: {r.succeeded}")
 
-# --- Step 6: (Optional) Search examples ---
+    results = search_client.upload_documents(documents=documents)
+    for i, result in enumerate(results):
+        status = "Success" if result.succeeded else "Failed"
+        print(f"Document {i + 1} upload: {status}")
+
+
+# ================================================================================================
+# STEP 7: EXAMPLE SEARCH OPERATIONS (KEYWORD, VECTOR, AND FILTERED SEARCH)
+# ================================================================================================
 
 def example_search(search_client):
-    print("\nKeyword Search for 'anesthesia system':")
+    """Demonstrates keyword, vector, and filtered search operations on the index."""
+    print("STEP 7: Running example search operations...")
+
+    print("\n🔍 Keyword Search for 'anesthesia system':")
     results = search_client.search(search_text="anesthesia system")
     for r in results:
-        print(f"- {r['filename']} - snippet: {r['content'][:100]}")
+        print(f"- {r['filename']} - snippet: {r['content'][:100]}...")
 
     print("\nVector Search for 'training for device setup':")
     query_vector = get_embedding("training for device setup")
+
     from azure.search.documents.models import VectorizedQuery
     vector_query = VectorizedQuery(
-        vector=query_vector, k_nearest_neighbors=3, fields="content_vector"
+        vector=query_vector,
+        k_nearest_neighbors=3,
+        fields="content_vector"
     )
+
     vector_results = search_client.search(
         search_text=None,
         vector_queries=[vector_query],
         select=["content", "filename", "document_url"]
     )
+
     for r in vector_results:
-        print(f"- {r['filename']} - snippet: {r['content'][:100]}")
+        print(f"- {r['filename']} - snippet: {r['content'][:100]}...")
 
     print("\nFiltered Search for documents with filename 'doc_1.pdf':")
     filtered_results = search_client.search(
         search_text="setup instructions",
         filter="filename eq 'doc_1.pdf'"
     )
-    for r in filtered_results:
-        print(f"- {r['filename']} - snippet: {r['content'][:100]}")
 
-# --- Main Pipeline ---
+    for r in filtered_results:
+        print(f"- {r['filename']} - snippet: {r['content'][:100]}...")
+
+
+# ================================================================================================
+# STEP 8: MAIN PIPELINE - ORCHESTRATES THE ENTIRE DOCUMENT PROCESSING WORKFLOW
+# ================================================================================================
 
 def main():
-    # Step 1: Create Index (Schema)
+    """Orchestrates the complete document processing pipeline from download to search interface."""
     create_search_index()
+    print()
 
-    # Step 2 & 3 & 4 & 5: Process each document
     documents_to_upload = []
+
     for i, url in enumerate(urls):
-        local_pdf_path = f"doc_{i+1}.pdf"
+        print(f"\nProcessing Document {i + 1}/{len(urls)}")
+        print("-" * 50)
+
+        local_pdf_path = f"doc_{i + 1}.pdf"
+
         if download_pdf(url, local_pdf_path):
-            print(f"Extracting content from {local_pdf_path} with Document Intelligence...")
             text, metadata = extract_content_with_doc_intelligence(local_pdf_path)
-            print(f'Content{i+1}:  {text}\n')
-            print(f'Metadata{i+1}:  {metadata}\n')
-            print("Generating embedding...")
+            print(f'Content preview: {text[:200]}...\n')
+            print(f'Metadata: {metadata}\n')
+
             embedding = get_embedding(text)
-            print(f'Embedding{i+1}:  {embedding}\n')
+            print(f'Embedding preview: {embedding[:5]}... (showing first 5 dimensions)\n')
 
             doc = {
-                "id": f"doc_{i+1}",
+                "id": f"doc_{i + 1}",
                 "content": text,
                 "product_name": metadata.get("title", "Unknown Product"),
                 "filename": os.path.basename(local_pdf_path),
@@ -214,10 +264,13 @@ def main():
             }
             documents_to_upload.append(doc)
         else:
-            print(f"Skipping document {i+1} due to download failure.")
+            print(f"Skipping document {i + 1} due to download failure.")
 
-    print("Document processing complete!")
-    print("documents_to_upload: ", documents_to_upload)
+    print("\n" + "=" * 80)
+    print("DOCUMENT PROCESSING SUMMARY")
+    print("=" * 80)
+    print(f"Total documents processed: {len(documents_to_upload)}")
+    print("Document processing pipeline completed!")
 
     if documents_to_upload:
         print(f"\nUploading {len(documents_to_upload)} documents to Azure Cognitive Search...")
@@ -225,13 +278,16 @@ def main():
     else:
         print("No documents to upload.")
 
-    # Step 6: Start Interactive Search Chat
-    print("\n🚀 Starting Interactive Search Chat...")
     start_interactive_search(
         search_endpoint=AZURE_SEARCH_ENDPOINT,
         search_api_key=AZURE_SEARCH_API_KEY,
         index_name=AZURE_SEARCH_INDEX_NAME
     )
+
+
+# ================================================================================================
+# ENTRY POINT
+# ================================================================================================
 
 if __name__ == "__main__":
     main()

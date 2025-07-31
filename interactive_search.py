@@ -90,12 +90,12 @@ class InteractiveSearchChat:
 
     def start_chat(self):
         """Start the interactive chat interface"""
-        print("\n" + "=" * 60)
-        print("🔍 AZURE AI SEARCH - INTERACTIVE CHAT")
-        print("=" * 60)
+        print("\n" + "=" * 70)
+        print("🔍 AZURE AI SEARCH - INTERACTIVE CHAT (DOCUMENT PROCESSING PIPELINE)")
+        print("=" * 70)
         print("Welcome! You can search through your uploaded documents.")
         print("Type 'help' for available commands or 'quit' to exit.")
-        print("-" * 60)
+        print("-" * 70)
 
         while True:
             print("\n📝 Search Options:")
