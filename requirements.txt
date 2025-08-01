@@ -1,5 +1,17 @@
-azure-search-documents  # Search and index documents in Azure Cognitive Search.
-azure-ai-formrecognizer # Extract data from forms and documents using AI.
-openai                  # Generate or summarize text with GPT models.
-requests                # Make HTTP API calls.
-python-dotenv           # Load environment variables from a .env file into your Python project
+# Azure SDK packages
+azure-search-documents>=11.4.0
+azure-ai-formrecognizer>=3.3.0
+azure-core>=1.29.0
+
+# OpenAI SDK
+openai>=1.12.0
+
+# Core dependencies
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Development and utilities
+typing-extensions>=4.8.0
+
+# Optional: For advanced logging and monitoring
+structlog>=23.2.0 

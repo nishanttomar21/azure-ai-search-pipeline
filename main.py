@@ -1,293 +1,224 @@
-import os
-import requests
-from azure.core.credentials import AzureKeyCredential
-from azure.search.documents.indexes import SearchIndexClient
-from azure.search.documents.indexes.models import (
-    SearchIndex, SimpleField, SearchField, SearchFieldDataType,
-    SearchableField, VectorSearch, VectorSearchProfile, HnswAlgorithmConfiguration
-)
-from azure.search.documents import SearchClient
-from azure.ai.formrecognizer import DocumentAnalysisClient
-from openai import AzureOpenAI
-from dotenv import load_dotenv
+"""
+Main entry point for the Azure AI Search Pipeline.
+Orchestrates the complete document processing and search setup workflow.
+"""
+import sys
+from pathlib import Path
 
-# Import the interactive search functionality
-from interactive_search import start_interactive_search
+# Add src to Python path
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-# ================================================================================================
-# STEP 1: ENVIRONMENT SETUP AND CONFIGURATION
-# ================================================================================================
+from src.config.settings import azure_config, DOCUMENT_URLS
+from src.core.azure_clients import AzureClientManager
+from src.core.document_processor import DocumentProcessor
+from src.core.embedding_generator import EmbeddingGenerator
+from src.search.index_manager import IndexManager
+from src.search.interactive_search import start_interactive_search
+from src.utils.logger import setup_logging, get_logger
 
-# Load environment variables from .env file
-load_dotenv()
-
-# Azure Search Service Configurations
-AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
-AZURE_SEARCH_API_KEY = os.getenv("AZURE_SEARCH_API_KEY")
-AZURE_SEARCH_INDEX_NAME = "library"
-
-# Azure Document Intelligence Service Configurations
-DOC_INTELLIGENCE_ENDPOINT = os.getenv("DOC_INTELLIGENCE_ENDPOINT")
-DOC_INTELLIGENCE_KEY = os.getenv("DOC_INTELLIGENCE_KEY")
-
-# Azure OpenAI Service Configurations
-OPENAI_API_ENDPOINT = os.getenv("OPENAI_API_ENDPOINT")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_VERSION = "2024-10-21"
-OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002"
-
-# URLs of PDFs to download and process
-urls = [
-    "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjA5MjcwMy0wMDEiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D",
-    "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjEwNTUxOC0wMDEiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D",
-    "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjA1MDgwMi0wMDEiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D",
-    "https://www.gehealthcare.com/support/manuals?search=eyJzZWFyY2hUZXJtIjoiMjA4MTQ5OS0wMDIiLCJsYW5ndWFnZU5hbWUiOiJFbmdsaXNoIChFTikifQ%3D%3D"
-]
+# Setup logging
+setup_logging(level="INFO")
+logger = get_logger(__name__)
 
 
-# ================================================================================================
-# STEP 2: AZURE COGNITIVE SEARCH INDEX CREATION WITH VECTOR SEARCH CAPABILITIES
-# ================================================================================================
+class AzureSearchPipeline:
+    """Main pipeline orchestrator for document processing and search setup."""
 
-def create_search_index():
-    """Creates or updates Azure Cognitive Search index with vector search capabilities."""
-    print("STEP 2: Creating Azure Cognitive Search Index...")
+    def __init__(self):
+        """Initialize the pipeline with required components."""
+        # Validate configuration
+        if not azure_config.validate():
+            raise ValueError("❌ Azure configuration validation failed. Check your .env file.")
 
-    credential = AzureKeyCredential(AZURE_SEARCH_API_KEY)
-    index_client = SearchIndexClient(endpoint=AZURE_SEARCH_ENDPOINT, credential=credential)
+        # Initialize core components
+        self.client_manager = AzureClientManager()
+        self.document_processor = DocumentProcessor(self.client_manager)
+        self.embedding_generator = EmbeddingGenerator(self.client_manager)
+        self.index_manager = IndexManager(self.client_manager)
 
-    fields = [
-        SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True, sortable=True),
-        SearchableField(name="content", type=SearchFieldDataType.String),
-        SimpleField(name="product_name", type=SearchFieldDataType.String, filterable=True, sortable=True),
-        SimpleField(name="filename", type=SearchFieldDataType.String, filterable=True, sortable=True),
-        SimpleField(name="filepath", type=SearchFieldDataType.String, filterable=True),
-        SimpleField(name="document_url", type=SearchFieldDataType.String, filterable=True),
-        SearchField(
-            name="content_vector",
-            type=SearchFieldDataType.Collection(SearchFieldDataType.Single),
-            searchable=True,
-            vector_search_dimensions=1536,
-            vector_search_profile_name="vector-config"
-        ),
-    ]
+    def run(self) -> bool:
+        """Execute the complete pipeline workflow."""
+        try:
+            logger.info("🚀 STARTING AZURE AI SEARCH PIPELINE")
+            logger.info("=" * 50)
 
-    vector_search = VectorSearch(
-        profiles=[VectorSearchProfile(name="vector-config", algorithm_configuration_name="algo-config")],
-        algorithms=[HnswAlgorithmConfiguration(name="algo-config")]
-    )
+            # Step 1: Health check
+            if not self._health_check():
+                return False
 
-    index = SearchIndex(name=AZURE_SEARCH_INDEX_NAME, fields=fields, vector_search=vector_search)
-    index_client.create_or_update_index(index=index)
-    print(f"Index '{AZURE_SEARCH_INDEX_NAME}' created/updated successfully.")
+            # Step 2: Create/update search index
+            if not self._setup_search_index():
+                return False
 
+            # Step 3: Process documents
+            processed_docs = self._process_documents()
+            if not processed_docs:
+                logger.error("❌ No documents were processed successfully")
+                return False
 
-# ================================================================================================
-# STEP 3: PDF DOCUMENT DOWNLOAD FROM URLS
-# ================================================================================================
+            # Step 4: Generate embeddings
+            enhanced_docs = self._generate_embeddings(processed_docs)
+            if not enhanced_docs:
+                logger.error("❌ No documents have valid embeddings")
+                return False
 
-def download_pdf(url, dest_path):
-    """Downloads a PDF file from URL and saves it to local path."""
-    print(f"STEP 3: Downloading {url} to {dest_path}...")
+            # Step 5: Upload to search index
+            if not self._upload_to_search(enhanced_docs):
+                return False
 
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            with open(dest_path, "wb") as f:
-                f.write(response.content)
-            print("Download completed.")
+            # Step 6: Display summary
+            self._display_summary(enhanced_docs)
+
+            # Step 7: Start interactive search
+            self._start_interactive_search()
+
             return True
-        else:
-            print(f"Failed to download {url}. Status code: {response.status_code}")
+
+        except KeyboardInterrupt:
+            logger.info("Pipeline interrupted by user")
             return False
-    except Exception as e:
-        print(f"Error downloading {url}: {str(e)}")
+        except Exception as e:
+            logger.error(f"❌ Pipeline execution failed: {e}")
+            return False
+
+    def _health_check(self) -> bool:
+        """Perform health check on Azure services."""
+        logger.info("🔍 Performing Azure services health check...")
+
+        try:
+            health_status = self.client_manager.health_check()
+
+            all_healthy = all(health_status.values())
+            if all_healthy:
+                logger.info("✅ All Azure services are healthy")
+                return True
+            else:
+                failed_services = [service for service, status in health_status.items() if not status]
+                logger.error(f"❌ Health check failed for: {', '.join(failed_services)}")
+                return False
+
+        except Exception as e:
+            logger.error(f"❌ Health check failed: {e}")
+            return False
+
+    def _setup_search_index(self) -> bool:
+        """Create or update the Azure Search index with error handling."""
+        logger.info("🔧 Setting up Azure Search index...")
+
+        try:
+            success = self.index_manager.create_or_update_index()
+            if success:
+                logger.info("✅ Search index setup completed")
+                return True
+        except Exception as e:
+            if "Algorithm name cannot be updated" in str(e):
+                logger.warning("⚠️ Index exists with different algorithm. Trying with new name...")
+
+                # Try with timestamped index name
+                import time
+                old_name = azure_config.search_index_name
+                azure_config.search_index_name = f"{old_name}_{int(time.time())}"
+
+                # Reinitialize index manager with new name
+                self.index_manager = IndexManager(self.client_manager)
+                success = self.index_manager.create_or_update_index()
+
+                if success:
+                    logger.info(f"✅ Created index with new name: {azure_config.search_index_name}")
+                    return True
+
         return False
 
+    def _process_documents(self) -> list:
+        """Process documents from URLs."""
+        logger.info("📄 Starting document processing...")
+        logger.info(f"Documents to process: {len(DOCUMENT_URLS)}")
 
-# ================================================================================================
-# STEP 4: CONTENT AND METADATA EXTRACTION USING AZURE DOCUMENT INTELLIGENCE
-# ================================================================================================
+        processed_docs = self.document_processor.process_documents_batch(DOCUMENT_URLS)
 
-def extract_content_with_doc_intelligence(file_path):
-    """Extracts text content and metadata from PDF using Azure Document Intelligence."""
-    print(f"STEP 4: Extracting content from {file_path} with Document Intelligence...")
+        if processed_docs:
+            logger.info(f"✅ Document processing completed: {len(processed_docs)} documents")
+        else:
+            logger.error("❌ Document processing failed")
 
-    credential = AzureKeyCredential(DOC_INTELLIGENCE_KEY)
-    client = DocumentAnalysisClient(endpoint=DOC_INTELLIGENCE_ENDPOINT, credential=credential)
+        return processed_docs
 
-    with open(file_path, "rb") as f_stream:
-        poller = client.begin_analyze_document("prebuilt-document", document=f_stream)
-        result = poller.result()
+    def _generate_embeddings(self, documents: list) -> list:
+        """Generate vector embeddings for documents."""
+        logger.info("🧮 Generating vector embeddings...")
 
-    text_lines = []
-    for page in result.pages:
-        for line in page.lines:
-            text_lines.append(line.content)
-    text = "\n".join(text_lines)
+        enhanced_docs = self.embedding_generator.add_embeddings_to_documents(documents)
 
-    metadata = {}
-    if hasattr(result, "metadata") and result.metadata:
-        metadata = {
-            "author": result.metadata.author if hasattr(result.metadata, "author") else None,
-            "title": result.metadata.title if hasattr(result.metadata, "title") else None,
-            "creation_date": result.metadata.created_date if hasattr(result.metadata, "created_date") else None
-        }
+        if enhanced_docs:
+            logger.info(f"✅ Embedding generation completed: {len(enhanced_docs)} documents")
+        else:
+            logger.error("❌ Embedding generation failed")
 
-    print(f"Extracted {len(text)} characters of text content.")
-    return text, metadata
+        return enhanced_docs
 
+    def _upload_to_search(self, documents: list) -> bool:
+        """Upload documents to Azure Search index."""
+        logger.info("📤 Uploading documents to Azure Search...")
 
-# ================================================================================================
-# STEP 5: VECTOR EMBEDDINGS GENERATION USING AZURE OPENAI
-# ================================================================================================
+        success = self.index_manager.upload_documents(documents)
 
-def get_embedding(text):
-    """Generates vector embeddings for text using Azure OpenAI embedding model."""
-    print("STEP 5: Generating embeddings using Azure OpenAI...")
+        if success:
+            logger.info("✅ Document upload completed")
+        else:
+            logger.error("❌ Document upload failed")
 
-    client = AzureOpenAI(
-        api_key=OPENAI_API_KEY,
-        api_version=OPENAI_API_VERSION,
-        azure_endpoint=OPENAI_API_ENDPOINT
-    )
+        return success
 
-    try:
-        response = client.embeddings.create(
-            input=text,
-            model=OPENAI_EMBEDDING_MODEL
-        )
-        embedding = response.data[0].embedding
-        print(f"Generated embedding with {len(embedding)} dimensions.")
-        return embedding
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
-        raise
+    def _display_summary(self, documents: list):
+        """Display pipeline execution summary."""
+        logger.info("\n" + "=" * 50)
+        logger.info("📋 PIPELINE EXECUTION SUMMARY")
+        logger.info("=" * 50)
+        logger.info(f"📄 Total documents processed: {len(documents)}")
+        logger.info(f"🧮 Documents with embeddings: {len(documents)}")
+        logger.info(f"📤 Documents uploaded to search: {len(documents)}")
 
+        # Display document details
+        for doc in documents:
+            logger.info(f"  • {doc['id']}: {doc['filename']} ({doc['content_length']} chars)")
 
-# ================================================================================================
-# STEP 6: DOCUMENT UPLOAD TO AZURE COGNITIVE SEARCH
-# ================================================================================================
+        logger.info("✅ Pipeline completed successfully!")
+        logger.info("=" * 50)
 
-def upload_documents_to_search(documents):
-    """Uploads processed documents to Azure Cognitive Search index."""
-    print("STEP 6: Uploading documents to Azure Cognitive Search...")
+    def _start_interactive_search(self):
+        """Launch the interactive search interface."""
+        logger.info("🎯 Starting Interactive Search Interface...")
+        logger.info("Press Ctrl+C to stop the pipeline and exit")
 
-    credential = AzureKeyCredential(AZURE_SEARCH_API_KEY)
-    search_client = SearchClient(
-        endpoint=AZURE_SEARCH_ENDPOINT,
-        index_name=AZURE_SEARCH_INDEX_NAME,
-        credential=credential
-    )
+        try:
+            start_interactive_search(
+                search_endpoint=azure_config.search_endpoint,
+                search_api_key=azure_config.search_api_key,
+                index_name=azure_config.search_index_name
+            )
+        except KeyboardInterrupt:
+            logger.info("Interactive search stopped by user")
+        except Exception as e:
+            logger.error(f"❌ Interactive search failed: {e}")
 
-    results = search_client.upload_documents(documents=documents)
-    for i, result in enumerate(results):
-        status = "Success" if result.succeeded else "Failed"
-        print(f"Document {i + 1} upload: {status}")
-
-
-# ================================================================================================
-# STEP 7: EXAMPLE SEARCH OPERATIONS (KEYWORD, VECTOR, AND FILTERED SEARCH)
-# ================================================================================================
-
-def example_search(search_client):
-    """Demonstrates keyword, vector, and filtered search operations on the index."""
-    print("STEP 7: Running example search operations...")
-
-    print("\n🔍 Keyword Search for 'anesthesia system':")
-    results = search_client.search(search_text="anesthesia system")
-    for r in results:
-        print(f"- {r['filename']} - snippet: {r['content'][:100]}...")
-
-    print("\nVector Search for 'training for device setup':")
-    query_vector = get_embedding("training for device setup")
-
-    from azure.search.documents.models import VectorizedQuery
-    vector_query = VectorizedQuery(
-        vector=query_vector,
-        k_nearest_neighbors=3,
-        fields="content_vector"
-    )
-
-    vector_results = search_client.search(
-        search_text=None,
-        vector_queries=[vector_query],
-        select=["content", "filename", "document_url"]
-    )
-
-    for r in vector_results:
-        print(f"- {r['filename']} - snippet: {r['content'][:100]}...")
-
-    print("\nFiltered Search for documents with filename 'doc_1.pdf':")
-    filtered_results = search_client.search(
-        search_text="setup instructions",
-        filter="filename eq 'doc_1.pdf'"
-    )
-
-    for r in filtered_results:
-        print(f"- {r['filename']} - snippet: {r['content'][:100]}...")
-
-
-# ================================================================================================
-# STEP 8: MAIN PIPELINE - ORCHESTRATES THE ENTIRE DOCUMENT PROCESSING WORKFLOW
-# ================================================================================================
 
 def main():
-    """Orchestrates the complete document processing pipeline from download to search interface."""
-    create_search_index()
-    print()
+    """Main entry point."""
+    try:
+        print("=" * 50)
+        print("🔍 Azure AI Search Pipeline (Documents)")
+        print("=" * 50)
+        print("\n")
 
-    documents_to_upload = []
+        pipeline = AzureSearchPipeline()
+        success = pipeline.run()
 
-    for i, url in enumerate(urls):
-        print(f"\nProcessing Document {i + 1}/{len(urls)}")
-        print("-" * 50)
+        return 0 if success else 1
 
-        local_pdf_path = f"doc_{i + 1}.pdf"
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        return 1
 
-        if download_pdf(url, local_pdf_path):
-            text, metadata = extract_content_with_doc_intelligence(local_pdf_path)
-            print(f'Content preview: {text[:200]}...\n')
-            print(f'Metadata: {metadata}\n')
-
-            embedding = get_embedding(text)
-            print(f'Embedding preview: {embedding[:5]}... (showing first 5 dimensions)\n')
-
-            doc = {
-                "id": f"doc_{i + 1}",
-                "content": text,
-                "product_name": metadata.get("title", "Unknown Product"),
-                "filename": os.path.basename(local_pdf_path),
-                "filepath": os.path.abspath(local_pdf_path),
-                "document_url": url,
-                "content_vector": embedding
-            }
-            documents_to_upload.append(doc)
-        else:
-            print(f"Skipping document {i + 1} due to download failure.")
-
-    print("\n" + "=" * 80)
-    print("DOCUMENT PROCESSING SUMMARY")
-    print("=" * 80)
-    print(f"Total documents processed: {len(documents_to_upload)}")
-    print("Document processing pipeline completed!")
-
-    if documents_to_upload:
-        print(f"\nUploading {len(documents_to_upload)} documents to Azure Cognitive Search...")
-        upload_documents_to_search(documents_to_upload)
-    else:
-        print("No documents to upload.")
-
-    start_interactive_search(
-        search_endpoint=AZURE_SEARCH_ENDPOINT,
-        search_api_key=AZURE_SEARCH_API_KEY,
-        index_name=AZURE_SEARCH_INDEX_NAME
-    )
-
-
-# ================================================================================================
-# ENTRY POINT
-# ================================================================================================
 
 if __name__ == "__main__":
-    main()
+    exit(main())
